@@ -73,7 +73,7 @@ export interface WeatherInfo {
   cloud: number;
 }
 
-const FEATURE_CELL = 24;
+export const FEATURE_CELL = 24;
 const REGION_CELL = 160;
 /** Half-extent of a settlement site: the hamlet footprint centered on the feature tile. */
 const SITE_R = Math.floor(getSettlementFootprint("hamlet").w / 2);
@@ -89,7 +89,7 @@ const CITY_REGION = 6;
  * towns and cities against every earlier settlement and every later one that
  * looks back — together the two directions close the pair completely.
  */
-const SETTLEMENT_GAP = 12;
+export const SETTLEMENT_GAP = 12;
 /** Feature-cell roll slices: below HAMLET_ROLL a cell hosts a hamlet; from
  * TOWN_ROLL to TOWN_ROLL_END a settled cell hosts a town. The town veto in
  * metroSpot scans a hair past the slice so a town never overlooks a neighbor
@@ -386,8 +386,27 @@ export class World {
       for (let dx = -3; dx <= 3; dx++) {
         const ncx = cx + dx;
         const ncy = cy + dy;
-        if (ncy > cy || (ncy === cy && ncx >= cx)) continue;
         if (ncx < 0 || ncy < 0) continue;
+        // a ruin, shrine or lair in a neighboring cell keeps its whole
+        // structure clear of this site: no landmark spawns inside a reserved
+        // settlement footprint (pure hash — no recursion, no order dependence).
+        // Minors also spawn on cells below the hamlet roll whose biome cannot
+        // host a settlement, so the veto covers the whole minor range.
+        const nroll = hash01(this.seed ^ 0xbead, ncx, ncy);
+        const nsettled = (() => {
+          const nhh2 = hash2(this.seed ^ 0xfea7, ncx, ncy);
+          const nbx = ncx * FEATURE_CELL + 3 + (nhh2 % (FEATURE_CELL - 6));
+          const nby = ncy * FEATURE_CELL + 3 + ((nhh2 >>> 8) % (FEATURE_CELL - 6));
+          const nb = this.computeBiomeOnly(nbx, nby);
+          return nb === "meadow" || nb === "forest" || nb === "hills" || nb === "steppe" || nb === "taiga" || nb === "beach";
+        })();
+        if (nroll < TOWN_ROLL && !(nroll < HAMLET_ROLL && nsettled)) {
+          const nhh = hash2(this.seed ^ 0xfea7, ncx, ncy);
+          const mfx = ncx * FEATURE_CELL + 3 + (nhh % (FEATURE_CELL - 6));
+          const mfy = ncy * FEATURE_CELL + 3 + ((nhh >>> 8) % (FEATURE_CELL - 6));
+          near.push({ x: mfx, y: mfy, d: SITE_R + 6 });
+        }
+        if (ncy > cy || (ncy === cy && ncx >= cx)) continue;
         const nf = this.cellFeature(ncx, ncy);
         if (!nf) continue;
         const nr = nf.kind === "hamlet" ? SITE_R : nf.kind === "town" ? TOWN_R : nf.kind === "city" ? CITY_R : 0;
@@ -533,7 +552,11 @@ export class World {
         const roll = hash01(this.seed ^ 0xbead, ncx, ncy);
         const nfx = ncx * FEATURE_CELL + 3 + (hh % (FEATURE_CELL - 6));
         const nfy = ncy * FEATURE_CELL + 3 + ((hh >>> 8) % (FEATURE_CELL - 6));
-        if (roll < HAMLET_ROLL) {
+        const nsettledMinor = (() => {
+          const nb = this.computeBiomeOnly(nfx, nfy);
+          return nb === "meadow" || nb === "forest" || nb === "hills" || nb === "steppe" || nb === "taiga" || nb === "beach";
+        })();
+        if (roll < HAMLET_ROLL && nsettledMinor) {
           // a hamlet neighbor: measure its realized site, not its raw pick.
           // Earlier cells only — a later hamlet finds this site on its own
           // when its turn comes, and measuring it here would recurse.
@@ -545,7 +568,9 @@ export class World {
           const spot = this.drySettlementSpot(ncx, ncy, nfx, nfy);
           if (spot) nbs.push({ x: spot.x, y: spot.y, d: R + SITE_R + SETTLEMENT_GAP });
         } else if (roll < TOWN_ROLL) {
-          // ruin, shrine or lair: sites at most 6 tiles across. Cities skip
+          // ruin, shrine or lair: sites at most 6 tiles across — including
+          // the unsettled below-hamlet cells the first branch no longer takes.
+          // Cities skip
           // this veto — their region suppresses lesser landmarks inside the
           // reserved site instead of demanding an empty wilderness.
           if (minorR !== null) nbs.push({ x: nfx, y: nfy, d: R + minorR + 1 });
@@ -968,6 +993,8 @@ export class World {
     if (c) return c;
     const r = getSettlementFootprint(settlementTier(f) ?? "hamlet").w >> 1;
     const out: { x: number; y: number }[] = [];
+    // the settlement's own gate tiles are thresholds too — residents keep off them
+    const gates = new Set(settlementEntrances(this, f).map((e) => e.y * WORLD_SIZE + e.x));
     for (let ly = -r; ly <= r; ly++) {
       for (let lx = -r; lx <= r; lx++) {
         const wx = f.x + lx;
@@ -978,6 +1005,7 @@ export class World {
         // leave the ground just outside every entrance clear — thresholds stay usable
         const byDoor = DIRS8.some(([dx, dy]) => this.siteAt(wx + dx, wy + dy)?.door);
         if (byDoor) continue;
+        if (gates.has(wy * WORLD_SIZE + wx)) continue;
         out.push({ x: wx, y: wy });
       }
     }
@@ -1021,7 +1049,7 @@ export class World {
    */
   private residentCache = new Map<string, { x: number; y: number }[]>();
 
-  private residentTimeline(f: Feature, idx: number, homes: Building[]): { x: number; y: number }[] {
+  private residentTimeline(f: Feature, idx: number, homes: Building[], occupied: { x: number; y: number }[] = []): { x: number; y: number }[] {
     const key = `${f.x}:${f.y}:${idx}`;
     const c = this.residentCache.get(key);
     if (c) return c;
@@ -1081,6 +1109,7 @@ export class World {
     let cur = -1;
     let bestD = Infinity;
     for (let i = 0; i < pool.length; i++) {
+      if (occupied.some((o) => o.x === pool[i].x && o.y === pool[i].y)) continue;
       const d = Math.abs(pool[i].x - doorTile.x) + Math.abs(pool[i].y - doorTile.y);
       if (d < bestD) {
         bestD = d;
@@ -1093,7 +1122,7 @@ export class World {
     const STEP = 4;
     // later residents politely keep off the earlier one's tile as they go —
     // timelines are cached in index order, so the earlier one always exists
-    const earlier = idx > 0 ? this.residentTimeline(f, idx - 1, homes) : null;
+    const earlier = idx > 0 ? this.residentTimeline(f, idx - 1, homes, occupied) : null;
     const tl: { x: number; y: number }[] = [];
     let path: number[] = [];
     for (let t = 0; t < DAY_TICKS; t++) {
@@ -1107,7 +1136,10 @@ export class World {
       }
       if (t % STEP === 0 && path.length) {
         const next = path[0];
-        if (!earlier || earlier[t].x !== pool[next].x || earlier[t].y !== pool[next].y) {
+        // a resident pauses rather than step onto a colleague's or a folk
+        // member's post — one tile, one person
+        const posted = occupied.some((o) => o.x === pool[next].x && o.y === pool[next].y);
+        if (!posted && (!earlier || earlier[t].x !== pool[next].x || earlier[t].y !== pool[next].y)) {
           path.shift();
           cur = next;
         }
@@ -1136,17 +1168,19 @@ export class World {
     ];
     const out: Npc[] = [];
     const h0 = hash2(this.seed ^ 0x7e5d, f.x * 5, f.y * 11);
-    const h1 = hash2(this.seed ^ 0x7e5d, f.x * 5 + 3, f.y * 11 + 13);
-    // the two residents never share a name
-    const ni0 = (h0 >>> 2) % NAMES.length;
-    const ni1 = (ni0 + 1 + ((h1 >>> 6) % (NAMES.length - 1))) % NAMES.length;
+    // residents never share a name: 0x9e37 is coprime with the name-count
+    // power of two, so stepping it walks every name exactly once.
+    // Folk posts and the recruiter's green are occupied all day — timelines
+    // treat them as walls, so npcAt always resolves the right person
+    const rec = this.settlementRecruiter(f);
+    const occupied = [...this.settlementNpcs(f).map((n) => ({ x: n.x, y: n.y })), ...(rec ? [{ x: rec.x, y: rec.y }] : [])];
     for (let i = 0; i < want && i < homes.length; i++) {
-      const tl = this.residentTimeline(f, i, homes);
+      const tl = this.residentTimeline(f, i, homes, occupied);
       const p = tl[((tick % tl.length) + tl.length) % tl.length];
-      const h = i === 0 ? h0 : h1;
+      const h = hash2(this.seed ^ 0x7e5d, f.x * 5 + 3 * i, f.y * 11 + 13 * i);
       out.push({
         role: "resident",
-        name: NAMES[i === 0 ? ni0 : ni1],
+        name: NAMES[(h0 + i * 0x9e37) % NAMES.length],
         settlement: f.name,
         x: p.x,
         y: p.y,

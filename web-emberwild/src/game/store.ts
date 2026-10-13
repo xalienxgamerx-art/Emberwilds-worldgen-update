@@ -1,22 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { MUSIC } from "./assets";
-import { initField } from "./combat";
-import { migrateBreeding } from "./breeding";
-import { migrateBiology, migrateMonsterGenes } from "./genetics";
-import { migrateMonsterSex } from "./monster";
-import { migrateRepro } from "./reproduction";
-import { migrateTerritories } from "./territory";
-import { migrateHeight } from "./height";
-import { migrateGrowth } from "./growth";
-import { migrateEcology } from "./ecology";
-import { migrateLineages } from "./lineage";
-import { migrateDistant } from "./distant";
-import { migrateCarrion } from "./carrion";
-import { migrateEggs } from "./eggs";
-import { getWorld } from "./world";
-import { migrateFactionKnowledge } from "./factions";
-import { ensureKnowledge } from "./knowledge";
-import { migrateWildXp, migratePersistence, SAVE_VERSION, loadChunks } from "./sim";
+import { afterMigrate, migrateLoaded } from "./migrate";
 import type { GameState } from "./types";
 
 export type Screen = "title" | "create" | "game";
@@ -123,59 +107,11 @@ export function loadSave(): boolean {
     const raw = localStorage.getItem(SAVE_KEY);
     if (!raw) return false;
     const gs = JSON.parse(raw) as GameState;
-    if (gs.version <= 4) {
-      if (gs.version === 3) ensureKnowledge(gs, true);
-      // v3/v4 → v5: live combat — party field positions, orders, overlays
-      gs.field = gs.field ?? {};
-      gs.orders = gs.orders ?? {};
-      gs.target = gs.target ?? null;
-      gs.ground = gs.ground ?? {};
-      gs.fighters = gs.fighters ?? {};
-      initField(gs);
-    }
-    // v5 → v6: commanded skills and per-monster aggression
-    gs.aggr = gs.aggr ?? {};
-    gs.skillQ = gs.skillQ ?? {};
-    // tracking marks (any version)
-    gs.tracked = gs.tracked ?? null;
-    gs.trackedHint = gs.trackedHint ?? 0;
-    // v6 → v7: allele-pair genomes (adds the genetic size gene)
-    if (gs.version <= 6) for (const m of [...gs.party, ...gs.pen]) migrateMonsterGenes(m);
-    // v7 → v8: monsters gain a sex
-    if (gs.version <= 7) for (const m of [...gs.party, ...gs.pen]) migrateMonsterSex(m);
-    // v8 → v9: loaded chunks respawn, so lairs field their packs
-    if (gs.version <= 8) gs.loadedChunks = [];
-    // v9 → v10: faction knowledge records, home banner resolved
-    if (gs.version <= 9) migrateFactionKnowledge(gs);
-    // v11 biology: lineage metadata + explicit wild genotypes — idempotent, runs on every load
-    migrateBiology(gs);
-    // v12 reproduction: reproductive profiles — idempotent, runs on every load
-    migrateRepro(gs);
-    // v13 breeding: nests and reproductive developments — idempotent, runs on every load
-    migrateBreeding(gs);
-    // v14 territories: persistent ecological home ranges — idempotent, runs on every load
-    migrateTerritories(gs);
-    // v15 height: terraces, cliffs and cave layers — positions re-validated, idempotent, runs on every load
-    if (migrateHeight(gs, getWorld(gs.seed))) initField(gs);
-    // v16 growth & ecology: lifecycle stages backdated, ecology state created — idempotent, runs on every load
-    migrateGrowth(gs);
-    migrateEcology(gs);
-    // v17 lineages: persistent ancestry records — idempotent, runs on every load
-    migrateLineages(gs);
-    // v18 distant worlds: abstract population state — idempotent, runs on every load
-    migrateDistant(gs);
-    // v19 food web: carrion state — idempotent, runs on every load
-    migrateCarrion(gs);
-    // v22 carried eggs: stolen eggs ride in the pack with their bloodline — idempotent, runs on every load
-    migrateEggs(gs);
-    // v20 wild experience: banked fight xp — idempotent, runs on every load
-    migrateWildXp(gs);
-    // v21 persistence: monsters the player has met stay real individuals — idempotent, runs on every load
-    migratePersistence(gs);
-    gs.version = SAVE_VERSION;
-    if (gs.version !== SAVE_VERSION) return false;
+    // migrateLoaded refuses malformed saves and saves from newer builds —
+    // the stored blob is left untouched either way
+    if (!migrateLoaded(gs)) return false;
     store.gs = gs;
-    loadChunks(gs);
+    afterMigrate(gs);
     store.screen = "game";
     emit();
     return true;

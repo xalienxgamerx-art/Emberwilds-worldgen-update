@@ -13,9 +13,10 @@ import type { GameState } from "./types";
  *  - Nations claim territory in weighted Voronoi blobs around capital hamlets,
  *    with three tiers (major realms, minor domains, free cities) so mixed sizes
  *    exist side by side. Unclaimable terrain (deep water, peaks) stays frontier.
- *  - Associations are chartered by one origin nation, keep a chapter hall in one
- *    of that nation's hamlets, and post notices about duels, tourneys and the
- *    legal sale of beasts.
+ *  - Associations are chartered by one origin nation, keep a chapter hall in
+ *    one of that nation's towns (a real building in the settlement), and post
+ *    notices about duels, tourneys and the legal sale of beasts. Hamlets keep
+ *    only recruiters; a city's regional seat is a headquarters, never a chapter.
  *
  * Nothing here decides what the player knows — learning nations and
  * associations mutates GameState.knowledge only, and that is all a save stores.
@@ -196,8 +197,9 @@ export class Factions {
       const inNation = this.world
         .featuresNear(nation.capX, nation.capY, nation.reach)
         .filter((f) => isSettlement(f) && this.nationAt(f.x, f.y) === nation);
-      const offCapital = inNation.filter((f) => f.x !== nation.capX || f.y !== nation.capY);
-      const pool = offCapital.length ? offCapital : inNation;
+      // a chapter is a hall in a town: hamlets keep recruiters only, and a
+      // city's association presence is a headquarters, never a chapter
+      const pool = inNation.filter((f) => hasSettlementTier(f, "town"));
       const usedChapters = new Set<string>();
       for (let i = 0; i < count && pool.length > usedChapters.size; i++) {
         const hh = hash2(this.seed ^ (0xbee1 + i * 31), nation.capX, nation.capY);
@@ -217,11 +219,12 @@ export class Factions {
           nationId: nation.id,
           chapter,
         };
-        // a chapter is a hall in a settlement, never the settlement itself:
-        // towns raise a dedicated chapter building the hall can point to
+        // every chapter stands in a town, which raises a dedicated chapter
+        // building the hall can point to
         if (hasSettlementTier(chapter, "town")) {
           const hall = this.world.settlementLayout(chapter).building("association");
           if (hall) assoc.chapterBuilding = hall.id;
+          else console.warn(`[factions] chapter ${assoc.id} found no hall building in ${chapter.name}`);
         }
         this.assocs.push(assoc);
         nation.associations.push(assoc);

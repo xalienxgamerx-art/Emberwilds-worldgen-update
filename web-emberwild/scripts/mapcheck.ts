@@ -49,6 +49,9 @@ import { changeLayer } from "../src/game/sim";
 import { World, findPath } from "../src/game/world";
 import { sightRadius } from "../src/game/perception";
 import { ROAD_CLASS_RANK, finishRoads, mapRoadLines, roadAt, roadClassFor, roadNetworkOf, pumpRoads, settlementEntranceAt, settlementRoads, type RoadNetwork } from "../src/game/roads";
+import { validateSettlementInfrastructure } from "../src/game/validate";
+import { migrateLoaded } from "../src/game/migrate";
+import { SAVE_VERSION } from "../src/game/sim";
 
 let fails = 0;
 const ok = (cond: boolean, label: string): void => {
@@ -5515,6 +5518,72 @@ console.log("\n-- WILDLIFE --");
   ok(postLess === 0, `every deliberate entrance stands gated — a post or wall on its approach (${postLess} bare)`);
   ok(postOnRoad === 0, `gateposts never stand on the road or the water (${postOnRoad} do)`);
   ok(posts > 0, `gateposts stand in the world as solid site pieces (${posts})`);
+}
+
+// ---- Phase 8: settlement infrastructure validation — footprints, interiors,
+// folk, associations, roads — across seeds, with timings and save round-trips ----
+{
+  const net = finishRoads(world); // cached — the roads block already built it
+  const result = validateSettlementInfrastructure(world, "MAPCHECK-1", { net });
+  const cats = (r: ReturnType<typeof validateSettlementInfrastructure>): string =>
+    Object.entries(r.counts).filter(([, n]) => n > 0).map(([c, n]) => `${c}:${n}`).join(", ") || "none";
+  for (const f of result.failures.slice(0, 8)) console.log(`  ! ${f.category} @ ${f.settlement ?? "-"} ${f.x !== undefined ? `(${f.x},${f.y})` : ""}: ${f.invariant}`);
+  ok(result.failures.length === 0, `the full settlement sweep is clean on MAPCHECK-1 (${result.settlements} settlements, ${result.buildings} buildings, failures: ${cats(result)})`);
+
+  // the sweep reads, never writes: a second sweep answers identically
+  const again = validateSettlementInfrastructure(world, "MAPCHECK-1", { net });
+  ok(JSON.stringify(again.failures) === JSON.stringify(result.failures), "running validation twice answers identically — no state leaks into generation");
+
+  // second seed, full sweep: roads, folk, associations and interiors all re-validated
+  const w8 = new World(seedFromText("EMBER"));
+  const tRoads = performance.now();
+  const net8 = finishRoads(w8);
+  const roadsMs = Math.round(performance.now() - tRoads);
+  const r8 = validateSettlementInfrastructure(w8, "EMBER", { net: net8 });
+  for (const f of r8.failures.slice(0, 8)) console.log(`  ! ${f.category} @ ${f.settlement ?? "-"} ${f.x !== undefined ? `(${f.x},${f.y})` : ""}: ${f.invariant}`);
+  ok(r8.failures.length === 0, `the full settlement sweep is clean on EMBER (${r8.settlements} settlements, ${r8.buildings} buildings, failures: ${cats(r8)})`);
+
+  // more seeds, cheap sweep: footprints and reservations only
+  for (const txt of ["FROSTPEAK", "DUNE", "ZED-9"]) {
+    const w9 = new World(seedFromText(txt));
+    const r9 = validateSettlementInfrastructure(w9, txt, { skipRoads: true, skipResidents: true });
+    for (const f of r9.failures.slice(0, 4)) console.log(`  ! ${f.category} @ ${f.settlement ?? "-"}: ${f.invariant}`);
+    ok(r9.failures.length === 0, `footprints and reservations are valid on ${txt} (${r9.settlements} settlements)`);
+  }
+
+  console.log(`[perf] road network build (EMBER): ${roadsMs}ms; full sweep (EMBER): ${r8.durationMs}ms; sweep (MAPCHECK-1, cached net): ${result.durationMs}ms`);
+
+  // determinism: a fresh world instance regenerates the same settlements tile for tile
+  const ham8 = w8.allFeatures().find((f) => f.kind === "hamlet");
+  const town8 = w8.allFeatures().find((f) => f.kind === "town");
+  const fresh8 = new World(w8.seed);
+  ok(
+    ham8 !== undefined && JSON.stringify(fresh8.settlementLayout(ham8).buildings) === JSON.stringify(w8.settlementLayout(ham8).buildings),
+    "a fresh EMBER instance regenerates its hamlets tile for tile",
+  );
+  ok(
+    town8 !== undefined && JSON.stringify(fresh8.settlementLayout(town8).buildings) === JSON.stringify(w8.settlementLayout(town8).buildings),
+    "a fresh EMBER instance regenerates its towns tile for tile",
+  );
+  ok(
+    town8 !== undefined && JSON.stringify(fresh8.settlementLayout(town8).urban?.gates ?? []) === JSON.stringify(w8.settlementLayout(town8).urban?.gates ?? []),
+    "a fresh EMBER instance regenerates the same gates",
+  );
+
+  // save compatibility: a current save migrates idempotently — the first
+  // migration backfills what test-created state skipped, the second changes nothing
+  const snapshot = JSON.stringify(gs);
+  const parsed = JSON.parse(snapshot) as GameState;
+  ok(migrateLoaded(parsed), "the current save migrates cleanly");
+  const once = JSON.stringify(parsed);
+  const reparsed = JSON.parse(once) as GameState;
+  ok(migrateLoaded(reparsed) && JSON.stringify(reparsed) === once, "migration leaves a migrated save byte-identical (idempotent)");
+  const newer = JSON.parse(snapshot) as GameState & { version: number };
+  newer.version = SAVE_VERSION + 1;
+  ok(!migrateLoaded(newer), "a save from a newer build is refused, not downgraded");
+  ok(!migrateLoaded({ version: 22 } as unknown as GameState), "malformed save data is refused with a diagnostic");
+  // settlement facts are never persisted: they regenerate from the seed
+  ok(JSON.stringify(parsed.party) === JSON.stringify(gs.party) && parsed.seed === gs.seed, "the migrated save preserves the party and the world seed (settlements regenerate, not migrate)");
 }
 
 if (fails) {
